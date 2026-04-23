@@ -1,4 +1,5 @@
 # Code Refactoring Report: Fake News ML Project
+Note: This report on changes is from colaborator Ethan (a friend of mine) during his studying of my project and updating the coding, all below is of his originals.
 So basically I inherited all your logic but:
 ## 1. Global Architecture & Dependency Management
 * **Previous State:** Libraries were loaded via multiple `library()` calls scattered throughout the script, risking missing dependencies and execution failures.
