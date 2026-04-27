@@ -1,0 +1,1006 @@
+---
+output:
+  pdf_document:
+    toc: false
+    number_sections: true
+    latex_engine: xelatex
+---
+\begin{titlepage}
+\centering
+\vspace*{0.30\textheight}
+
+{\LARGE Source Credibility, Belief, and Sharing Behavior\par}
+\vspace{0.7cm}
+{\LARGE A Causal Machine Learning Analysis\par}
+\vspace{1.2cm}
+{\LARGE Duc Huy Lam\par}
+
+\end{titlepage}
+
+\setcounter{tocdepth}{3}
+\tableofcontents
+\thispagestyle{empty}
+\newpage
+\setcounter{page}{1}
+```{r setup, include=FALSE}
+#: Global options and dependencies
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  comment = NA,
+  fig.align = "center",
+  fig.width = 7,
+  fig.height = 4.5
+)
+
+# Single source of truth for packages
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(
+  tidyverse, stargazer, foreign, stringr, readr, ggpubr, gridExtra, 
+  rsample, fastDummies, fBasics, reshape2, clubSandwich, glmnet, hdm, 
+  rpart, gbm, h2o, caret, DoubleML, mlr3, mlr3learners, mlr3extralearners, 
+  ivreg, causalTree, rpart.plot, vip, pdp, broom, sandwich, lmtest
+)
+```
+
+```{r custom-functions, include=FALSE}
+#: Global Helper Functions
+# Function to extract robust standard errors
+get_robust_se <- function(model_obj) {
+  sqrt(diag(sandwich::vcovHC(model_obj, type = "HC1")))
+}
+
+# Function to dynamically subset data for a specific outcome, dropping NAs securely
+prep_data <- function(df, outcome_var, covars) {
+  df %>%
+    select(all_of(c(outcome_var, "d_treatment_source", covars))) %>%
+    drop_na()
+}
+theme_set(
+  theme_minimal(base_size = 11) +
+    theme(
+      plot.title = element_text(face = "bold", size = 12),
+      plot.caption = element_text(size = 8),
+      panel.grid.minor = element_blank()
+    )
+)
+```
+# Introduction
+## Research Objective
+
+The increasing spread of “fake news” represents one of the great challenges societies face in the 21st century. The aim of the research is to investigate how sources (fake vs. real) influence whether people believe and share what they read.
+Specifically, the objectives are: (1) Investigate how imitating well-known and credible sources affects people’s belief in the information provided; (2) Investigate how the credibility of these sources affects the likelihood of sharing the news; (3) Explore how factors like age, education, income influence the above dynamics; (4) Uncover CATE and treatment heterogeneity using machine learning techniques blending with conventional econometric methods
+
+## Research Questions and Hypotheses
+
+Bauer (2020) proposes two main hypotheses. First, individuals are more likely to believe news reports from real sources than from fake sources (H1a). Second, individuals are more likely to share news originating from real sources (H1b). While these hypotheses focus on average effects, an equally important question is whether the impact of source credibility varies across individuals. We therefore adopt an exploratory approach to study treatment heterogeneity, without imposing strong prior assumptions. 
+
+Demographic factors such as age, education, and income are likely to play a key role in shaping responses to information. Age, in particular, has been shown to influence media consumption and online participation (Hargittai and Walejko, 2008; Loges and Jung, 2001). However, the empirical evidence is mixed: some studies suggest that younger individuals are less influenced by mainstream news sources (American Press Institute, 2017; YouGov, 2017; PricewaterhouseCoopers, 2018), while others find that older individuals exhibit greater skepticism toward media (Gunther, 1992; Metzger et al., 2003). Education and income are also important, as they are associated with the ability to distinguish between credible and non-credible information sources (Fogg et al., 2001). At the same time, there is ongoing debate about whether higher education reduces or reinforces biases in information processing (Kahan, 2013; Tappin, Pennycook, and Rand, 2018).
+
+To test the main hypotheses, we employ t-tests for average treatment effects and linear regression models for interaction effects. In addition, we conduct robustness and manipulation checks to ensure the validity of the experimental design. However, analyzing treatment heterogeneity using conventional methods is challenging due to the large number of potential covariates. In particular, conducting multiple hypothesis tests leads to concerns about statistical validity, as p-values become unreliable under multiple testing (Athey and Imbens, 2017). To address this issue, we complement standard econometric approaches with machine learning methods that allow for a flexible and data-driven exploration of heterogeneous treatment effects.
+
+# Methodology
+## Data Description
+```{r data-loading, include=FALSE}
+datas_short <- read.csv("../data/fakenewsdata.csv")
+
+# Create non-linear transformations centrally
+datas_short <- datas_short %>% 
+  mutate(
+    age2 = x_age^2,
+    ed2 = x_education_num^2,
+    income2 = x_income_num^2
+  )
+
+# Define global variable lists for clean subsetting later
+outcomes <- c("y_belief_report_num", "y_share_report_email_num", 
+              "y_share_report_fb_num", "y_share_report_twitter_num", 
+              "y_share_report_whatsapp_num")
+
+covars_num_no2  <- c("x_education_num", "x_sex_num", "x_age", "x_income_num")
+covars_num_all2 <- c(covars_num_no2, "age2", "ed2", "income2")
+covars_cat_no2  <- c("x_education_fac", "x_sex_fac", "x_age", "x_income_fac")
+```
+We use a dataset 'Fake News' including 1980 individuals with a selected set of variables from the original dataset collected by Bauer (2020) showing how news sources influence people's beliefs and intentions to share news reports. The analysis includes demographic control variables such as \texttt{age},  \texttt{education},  \texttt{income}, and  \texttt{gender}.  \texttt{Age} is grouped into five categories, while  \texttt{education} reflects the highest level attained.  \texttt{Income} is divided into eleven brackets with 500 euro increments, and gender is coded as a binary variable. The main outcomes of interest as outcome variables are  \texttt{belief} in the news report and sharing intentions. Sharing behavior is measured across multiple platforms, including  \texttt{email},  \texttt{Facebook},  \texttt{Twitter}, and  \texttt{WhatsApp}.
+
+```{r summary-stats, echo=FALSE}
+summary_table <- datas_short %>%
+  select(
+    Education = x_education_num,
+    Gender = x_sex_num,
+    Age = x_age,
+    Income = x_income_num,
+    `Treatment: Source` = d_treatment_source,
+    Belief = y_belief_report_num,
+    `Share: Email` = y_share_report_email_num,
+    `Share: Facebook` = y_share_report_fb_num,
+    `Share: Twitter` = y_share_report_twitter_num,
+    `Share: WhatsApp` = y_share_report_whatsapp_num
+  ) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "Variable",
+    values_to = "Value"
+  ) %>%
+  group_by(Variable) %>%
+  summarize(
+    N = sum(!is.na(Value)),
+    Mean = mean(Value, na.rm = TRUE),
+    `St. Dev.` = sd(Value, na.rm = TRUE),
+    Min = min(Value, na.rm = TRUE),
+    Max = max(Value, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+knitr::kable(
+  summary_table,
+  digits = 2,
+  caption = "Summary statistics key variables",
+  booktabs = TRUE
+)
+```
+
+The summary statistics from Table 1 suggest that the main variables are broadly balanced in terms of their mean values, although some degree of skewness is evident, as illustrated in Figure 1. In addition, sharing behavior varies across platforms, with Twitter being the least used channel. This pattern may introduce limitations that will be discussed later. Figure 1 presents the distributions of the key demographic variables used in the analysis.
+```{r conditional-dist-plots, echo=FALSE, fig.cap="Descriptive distributions of key demographic variables", fig.width=7, fig.height=5.2}
+p_income <- datas_short %>%
+  drop_na(x_income_fac) %>%
+  ggplot(aes(x = x_income_fac)) +
+  geom_bar(fill = "grey75", color = "white") +
+  labs(x = "Income", y = NULL) +
+  theme_minimal(base_size = 10) +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1, size = 7))
+
+p_age <- datas_short %>%
+  drop_na(x_age) %>%
+  ggplot(aes(x = x_age)) +
+  geom_histogram(bins = 25, fill = "grey75", color = "white") +
+  labs(x = "Age", y = NULL) +
+  theme_minimal(base_size = 10)
+
+p_education <- datas_short %>%
+  drop_na(x_education_fac) %>%
+  ggplot(aes(x = x_education_fac)) +
+  geom_bar(fill = "grey75", color = "white") +
+  labs(x = "Education", y = NULL) +
+  theme_minimal(base_size = 10) +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1, size = 8))
+top_row <- p_income
+bottom_row <- ggpubr::ggarrange(p_age, p_education, ncol = 2)
+
+ggpubr::ggarrange(
+  top_row,
+  bottom_row,
+  ncol = 1,
+  heights = c(1, 1)
+)
+```
+**Remark:** Alternatively, we compare the average values of the variables across the control group (given fake source, assume value `0`) and the treatment group (given true source, assume value `1`), shown in Table 2. The results indicate no substantial differences in means between the two groups, suggesting a reasonable degree of balance. The distributions appear broadly similar across most variables, with the exception of `age`, where some differences are observed. In addition, the sample appears to be slightly skewed toward `male` respondents relative to `female` respondents.
+```{r mean-comparisons, echo=FALSE}
+mean_comparison_table <- datas_short %>% 
+  group_by(d_treatment_source) %>% 
+  summarise(
+    Belief = mean(y_belief_report_num, na.rm = TRUE),
+    Age = mean(x_age, na.rm = TRUE),
+    Gender = mean(x_sex_num, na.rm = TRUE),
+    Education = mean(x_education_num, na.rm = TRUE),
+    Income = mean(x_income_num, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    Group = ifelse(d_treatment_source == 1, "Real source", "Fake source")
+  ) %>%
+  select(
+    Group, Belief, Age, Gender, Education, Income
+  )
+
+knitr::kable(
+  mean_comparison_table,
+  digits = 2,
+  caption = "Mean comparison between treatment and control groups",
+  booktabs = TRUE
+)
+```
+Following the literature, we decide to include quadratic transformation of \texttt{income}, \texttt{age} and \texttt{education}, as well as consider non-linear relationship between controls and outcomesto be used in analysis section.
+
+```{r scatter-plots, echo=FALSE, fig.cap="Relationship between selected controls and belief", fig.width=6.2, fig.height=3.6}
+# scatter_data <- datas_short %>%
+#   select(
+#     Belief = y_belief_report_num,
+#     Age = x_age,
+#     Education = x_education_num
+#   ) %>%
+#   pivot_longer(
+#     cols = c(Age, Education),
+#     names_to = "Variable",
+#     values_to = "Value"
+#   ) %>%
+#   drop_na()
+# 
+# ggplot(scatter_data, aes(x = Value, y = Belief)) +
+#   geom_point(alpha = 0.18, size = 0.55) +
+#   geom_smooth(method = "lm", se = FALSE, linewidth = 0.6) +
+#   facet_wrap(~ Variable, scales = "free_x", nrow = 1) +
+#   labs(
+#     x = NULL,
+#     y = "Belief"
+#   ) +
+#   theme_minimal(base_size = 9) +
+#   theme(
+#     strip.text = element_text(face = "bold"),
+#     panel.grid.minor = element_blank(),
+#     plot.title = element_blank()
+#   )
+```
+<!-- To ensure consistency and robustness across our empirical estimations, we employ a dynamic data-subsetting pipeline. Instead of relying on static, hardcoded data splits, we constructed a programmatic helper function (`prep_data`) that dynamically generates the exact estimation sample required for each model specification.  -->
+
+<!-- For every regression or machine learning model, this function: -->
+<!-- 1. Isolates the specific dependent variable (e.g., Belief vs. Facebook sharing). -->
+<!-- 2. Selects the designated covariate matrix (either the strictly numeric, categorical, or non-linear quadratic variable sets). -->
+<!-- 3. Executes a strict complete-case analysis (`listwise deletion`) by securely dropping missing observations (`NA`s) *only* for the variables actively used in that specific iteration. -->
+
+<!-- This functional programming approach prevents data leakage, maximizes our retained sample size for each specific model, and ensures strict computational reproducibility. -->
+
+## Statistical Modelling and Analysis
+
+The empirical analysis combines *conventional econometric methods* with modern *causal machine learning* techniques. We first estimate average treatment effects using *simple linear regression, multiple linear regression, logistic regression* for binary sharing outcomes, and *LASSO-based* methods. We then examine treatment heterogeneity, focusing mainly on the belief outcome, using *causal trees, T-learners, and Double Machine Learning*. The final summary table compares the estimated conditional average treatment effects across these approaches, highlighting how conventional econometric estimates relate to more flexible machine learning-based methods.
+
+### Conventional Econometric methods
+
+```{r t-test-and-slr, echo=FALSE}
+h1_ttest_results <- datas_short %>%
+  select(d_treatment_source, all_of(outcomes)) %>%
+  pivot_longer(
+    cols = all_of(outcomes),
+    names_to = "Outcome",
+    values_to = "Value"
+  ) %>%
+  drop_na() %>%
+  group_by(Outcome) %>%
+  do(broom::tidy(t.test(Value ~ d_treatment_source, data = ., var.equal = TRUE))) %>%
+  ungroup() %>%
+  mutate(
+    Outcome = case_when(
+      Outcome == "y_belief_report_num" ~ "Belief",
+      Outcome == "y_share_report_email_num" ~ "Email sharing",
+      Outcome == "y_share_report_fb_num" ~ "Facebook sharing",
+      Outcome == "y_share_report_twitter_num" ~ "Twitter sharing",
+      Outcome == "y_share_report_whatsapp_num" ~ "WhatsApp sharing",
+      TRUE ~ Outcome
+    ),
+    Estimate = round(estimate, 3),
+    `t-statistic` = round(statistic, 3),
+    `p-value` = round(p.value, 3),
+    N = round(parameter + 2, 0)
+  ) %>%
+  select(Outcome, Estimate, `t-statistic`, `p-value`, N)
+
+knitr::kable(
+  h1_ttest_results,
+  caption = "T-test results for source treatment",
+  booktabs = TRUE
+)
+
+models_slr <- lapply(outcomes, function(y) {
+  lm(as.formula(paste(y, "~ d_treatment_source")), data = datas_short)
+})
+names(models_slr) <- outcomes
+
+se_slr <- lapply(models_slr, get_robust_se)
+```
+
+We begin by estimating simple linear regressions and conducting t-tests to examine our hypotheses. These methods allow us to assess whether differences in average belief and sharing intentions between the two groups are statistically significant. The results provide strong support for *H1a*, while the evidence for *H1b* is more mixed.
+
+**Remark:** As shown in Table 3, the estimates indicate a positive and statistically significant average treatment effect of approximately 0.62 on `belief`. We also observe a positive and significant effect for `Facebook` sharing, suggesting that being in the *treatment* group increases the probability of sharing via `Facebook` by about 5 percentage points. In addition, the t-test for `WhatsApp` sharing shows a significant effect. In contrast, the estimated effect on `email` sharing is not statistically different from zero. For `Twitter`, where the number of observations is relatively limited, no significant treatment effect is detected. Throughout the analysis, we adjust standard errors for heteroskedasticity using the HC1 correction. We do not account for serial correlation, as the data do not exhibit any clear clustered or panel structure.
+
+```{r logit-vs-lpm, echo=FALSE, fig.cap="Logit and LPM comparison for Facebook sharing", fig.width=4.8, fig.height=1.8}
+df_fb <- prep_data(datas_short, "y_share_report_fb_num", covars_num_no2)
+
+logistic_model <- glm(
+  y_share_report_fb_num ~ d_treatment_source,
+  data = df_fb,
+  family = binomial
+)
+
+linear_model <- lm(
+  y_share_report_fb_num ~ d_treatment_source,
+  data = df_fb
+)
+
+df_fb$predicted_prob_lr_simple <- predict(logistic_model, type = "response")
+df_fb$predicted_prob_lm_simple <- predict(linear_model, type = "response")
+
+ggplot(df_fb, aes(x = factor(d_treatment_source), y = y_share_report_fb_num)) +
+  geom_jitter(width = 0.05, height = 0.035, alpha = 0.30, size = 0.55) +
+  stat_summary(
+    aes(y = predicted_prob_lm_simple, group = 1, linetype = "linear probability model"),
+    fun = mean,
+    geom = "line",
+    linewidth = 0.55
+  ) +
+  stat_summary(
+    aes(y = predicted_prob_lr_simple, group = 1, linetype = "Logit"),
+    fun = mean,
+    geom = "line",
+    linewidth = 0.55
+  ) +
+  labs(
+    x = NULL,
+    y = "Facebook sharing",
+    linetype = NULL
+  ) +
+  scale_x_discrete(labels = c("Control", "Treatment")) +
+  theme_minimal(base_size = 6) +
+  theme(
+    legend.position = "bottom",
+    panel.grid.minor = element_blank(),
+    axis.title.y = element_text(size = 6),
+    axis.text = element_text(size = 5)
+  )
+```
+**Remark:** Since the sharing intention variables are binary, a *logistic regression model* may be more appropriate than a *linear probability model*. We perhaps give a illustration for the comparison between the *linear probability model* and the *logit model* for `Facebook sharing` in Figure 2, which unsurprisingly similar predicted probabilities are shown across the control and treatment groups. Since the coefficient estimates from the *logit model* are less straightforward to interpret, we continue using the *linear probability model* in the main analysis for ease of interpretation.
+
+```{r corrolation-test, echo=FALSE}
+cor_results <- tibble(
+  Variable = c("Age", "Gender", "Income", "Education"),
+  Correlation = c(
+    cor(datas_short$d_treatment_source, datas_short$x_age, use = "complete.obs"),
+    cor(datas_short$d_treatment_source, datas_short$x_sex_num, use = "complete.obs"),
+    cor(datas_short$d_treatment_source, datas_short$x_income_num, use = "complete.obs"),
+    cor(datas_short$d_treatment_source, datas_short$x_education_num, use = "complete.obs")
+  ),
+  `p-value` = c(
+    cor.test(datas_short$d_treatment_source, datas_short$x_age)$p.value,
+    cor.test(datas_short$d_treatment_source, datas_short$x_sex_num)$p.value,
+    cor.test(datas_short$d_treatment_source, datas_short$x_income_num)$p.value,
+    cor.test(datas_short$d_treatment_source, datas_short$x_education_num)$p.value
+  )
+) %>%
+  mutate(
+    Correlation = round(Correlation, 3),
+    `p-value` = round(`p-value`, 3)
+  )
+
+knitr::kable(
+  cor_results,
+  caption = "Correlation between treatment and control variables",
+  booktabs = TRUE
+)
+```
+We next examine whether adding control variables changes the estimated treatment effects. The correlation checks in Table 4 suggest only weak associations between the treatment indicator and the main controls, which is consistent with the randomized design. Nevertheless, we estimate multiple linear regression models with demographic controls and then extend the specification by adding quadratic terms for `age`, `education`, and `income`. Standard errors are adjusted using the HC1 heteroskedasticity-robust correction.
+
+```{r mlr, include=FALSE}
+# Multiple linear regression with demographic controls
+models_mlr1 <- lapply(outcomes, function(y) {
+  df <- prep_data(datas_short, y, covars_num_no2)
+  lm(as.formula(paste(y, "~ .")), data = df)
+})
+names(models_mlr1) <- outcomes
+se_mlr1 <- lapply(models_mlr1, get_robust_se)
+
+# Multiple linear regression with demographic controls and quadratic terms
+models_mlr2 <- lapply(outcomes, function(y) {
+  df <- prep_data(datas_short, y, covars_num_all2)
+  lm(as.formula(paste(y, "~ .")), data = df)
+})
+names(models_mlr2) <- outcomes
+se_mlr2 <- lapply(models_mlr2, get_robust_se)
+```
+
+#### LASSO regression methods
+
+
+As a final step in the linear econometric model section, we additionally estimate a *LASSO specifications*. The purpose is to select a parsimonious set of covariates while still allowing the model to capture relevant linear relationships among the controls. A limitation of *standard LASSO* is that some coefficients may be shrunk exactly to zero. In this application, the *treatment effect* for `Twitter sharing` is not retained in the *Post-LASSO* specification, in particular, having estimates are `null`. To address this issue, we also estimate a *Double LASSO* model, where the *treatment* variable is forced into the estimation procedure. Table 5 summarizes the estimated treatment effects from the simple linear regression, multiple linear regression, Post-LASSO, and Double LASSO specifications.
+
+```{r lasso, include=FALSE}
+# Post-LASSO estimation
+run_post_lasso <- function(outcome_var) {
+  model_data <- prep_data(datas_short, outcome_var, covars_num_all2)
+
+  y <- model_data[[outcome_var]]
+  X <- as.matrix(model_data %>% select(-all_of(outcome_var)))
+
+  set.seed(1234)
+  lasso_cv <- cv.glmnet(X, y, alpha = 1)
+  lasso_fit <- glmnet(X, y, alpha = 1, lambda = lasso_cv$lambda.min)
+
+  selected_index <- which(lasso_fit$beta != 0)
+
+  if (length(selected_index) == 0) {
+    return(NULL)
+  }
+
+  selected_variables <- row.names(lasso_fit$beta)[selected_index]
+
+  post_lasso_data <- as.data.frame(X[, selected_variables, drop = FALSE]) %>%
+    mutate(y = y)
+
+  lm(y ~ ., data = post_lasso_data)
+}
+
+models_plasso <- lapply(outcomes, run_post_lasso)
+names(models_plasso) <- outcomes
+
+se_plasso <- lapply(models_plasso, function(model) {
+  if (is.null(model)) return(NULL)
+  get_robust_se(model)
+})
+```
+
+```{r double-lasso, include=FALSE}
+run_double_lasso <- function(y_var) {
+  df <- prep_data(datas_short, y_var, covars_num_all2)
+  D <- as.matrix(df$d_treatment_source)
+  W <- as.matrix(df %>% select(-all_of(y_var), -d_treatment_source))
+  y <- as.matrix(df[[y_var]])
+  
+  set.seed(123)
+  rlassoEffect(x = W, y = y, d = D, method = "double selection")
+}
+
+models_dlasso <- lapply(outcomes, run_double_lasso)
+names(models_dlasso) <- outcomes
+```
+
+<!-- my old comment -->
+<!-- Our compact estimation result table (table 2) for 4 models (except for twitter), we also include CATE estimated from Double LASSO -->
+<!-- TABLE 2: Estimation results for Post Lasso (PL), MLR full var^2, MLR no var^2, SimpleLR -->
+
+```{r table-2-stargazer, echo=FALSE, results='asis'}
+model_pl_belief   <- models_plasso[["y_belief_report_num"]]
+model_mlr2_belief <- models_mlr2[["y_belief_report_num"]]
+model_mlr1_belief <- models_mlr1[["y_belief_report_num"]]
+model_slr_belief  <- models_slr[["y_belief_report_num"]]
+
+se_pl_belief   <- se_plasso[["y_belief_report_num"]]
+se_mlr2_belief <- se_mlr2[["y_belief_report_num"]]
+se_mlr1_belief <- se_mlr1[["y_belief_report_num"]]
+se_slr_belief  <- se_slr[["y_belief_report_num"]]
+
+cat("\\begin{table}[htbp]\n")
+cat("\\centering\n")
+cat("\\footnotesize\n")  # Changed from \scriptsize to \footnotesize (balanced)
+cat("\\setlength{\\tabcolsep}{6pt}\n")
+cat("\\renewcommand{\\arraystretch}{1.4}\n")  # Key: increases row height
+
+cat("\\caption{Treatment effect on belief across linear econometric models}\n")
+cat("\\label{tab:belief_models}\n")
+
+
+stargazer(
+  model_pl_belief,
+  model_mlr2_belief,
+  model_mlr1_belief,
+  model_slr_belief,
+  type = "latex",
+  se = list(se_pl_belief, se_mlr2_belief, se_mlr1_belief, se_slr_belief),
+
+  dep.var.labels = NULL,
+  column.labels = c("Post-LASSO", "MLR2", "MLR1", "SLR"),
+
+  covariate.labels = c(
+    "Source treatment",
+    "Education",
+    "Gender",
+    "Age",
+    "Income",
+    "Age squared",
+    "Education squared",
+    "Income squared",
+    "Constant"
+  ),
+
+  digits = 3,
+  no.space = TRUE,
+  single.row = TRUE,
+  omit.stat = c("f", "ser"),
+  notes = "HC1 robust standard errors in parentheses.",
+
+  header = FALSE,
+  float = FALSE,
+  title = ""
+)
+
+cat("\\end{table}\n")
+```
+
+
+**Remark:** According to Table 5, The estimated CATE for `belief` decreases as additional controls are included, suggesting that controlling for observed characteristics leads to more reliable estimates. Moreover, some control variables influence the magnitude of the treatment effect; for instance, the Post-LASSO results suggest that `income` has a positive linear association with `belief.` For `email sharing`, the estimated CATE remains similar across all models. An effect of `gender` is only captured in the MLR1 (multiple linear regression 1) specification, where *quadratic terms* are not included. For `Facebook sharing`, the estimated CATE is consistent across models. A U-shaped nonlinear effect of `education` emerges when quadratic terms (MLR2-multiple linear regression 2) are included, indicating that individuals with either low or high levels of `education` are more likely to share via `Facebook` compared to those with moderate levels of `education`, holding other factors constant. 
+
+\newpage
+For `Twitter sharing`,  linear regression models show no significant effects. However, the Post-LASSO specification suggests a U-shaped relationship with `income`, where sharing initially decreases with income and then increases at higher `income` levels, on average and controlling for other variables. For `WhatsApp sharing`, the estimated CATE is similar across models, while `age` exhibits a nonlinear relationship with sharing behavior.
+```{r dl-summaries, echo=FALSE}
+# Format p-value manually
+dlasso_belief_table <- data.frame(
+  Outcome = "Belief",
+  Estimate = as.numeric(models_dlasso$y_belief_report_num$coefficient),
+  t_statistic = as.numeric(models_dlasso$y_belief_report_num$t),
+  p_value = formatC(as.numeric(models_dlasso$y_belief_report_num$pval), 
+                    format = "f", digits = 4)
+)
+
+knitr::kable(
+  dlasso_belief_table,
+  digits = c(0, 3, 2, 4),
+  caption = "Double LASSO estimate for belief",
+  booktabs = TRUE,
+  col.names = c("Outcome", "Estimate", "t-statistic", "p-value")
+)
+```
+
+**Remark:** Overall, the Double LASSO estimate for `belief` in Table 6 is close to the estimates obtained from the linear regression specifications from Table 5 and remains statistically significant. In comparison, the simple linear regression tends to produce larger estimated effects for `belief`, `email sharing`, and `Facebook sharing`, while Double LASSO produces a relatively larger estimate for `WhatsApp sharing`.
+
+### Causal Machine Learning methods
+*Treatment heterogeneity* can be examined more flexibly using causal machine learning methods. However, before moving to these methods, we first demonstrate a conventional econometric approach. In the literature, heterogeneous treatment effects are often studied by interacting the treatment variable with demographic characteristics. Here, we use linear models with *interaction terms* (LMI) as a baseline approach. Specifically, we interact the source treatment with selected demographic variables to examine whether the effect on `belief` differs across subgroups.
+
+```{r lmi-models, echo=FALSE, results='asis'}
+df_belief_cat <- prep_data(datas_short, "y_belief_report_num", covars_cat_no2)
+
+# rename variables BEFORE modeling
+df_belief_cat <- df_belief_cat %>%
+  rename(
+    belief = y_belief_report_num,
+    treatment = d_treatment_source,
+    education = x_education_fac,
+    gender = x_sex_fac,
+    income = x_income_fac,
+    age = x_age
+  )
+
+ilm1 <- lm(belief ~ treatment * education, data = df_belief_cat)
+ilm2 <- lm(belief ~ treatment * gender, data = df_belief_cat)
+ilm3 <- lm(belief ~ treatment * income, data = df_belief_cat)
+ilm4 <- lm(belief ~ treatment * age, data = df_belief_cat)
+
+cat("\\begin{table}[htbp]\n")
+cat("\\centering\n")
+cat("\\scriptsize\n")
+cat("\\setlength{\\tabcolsep}{4pt}\n")
+cat("\\caption{Heterogeneous treatment effects across subgroups (interaction models)}\n")
+
+stargazer(
+  ilm1, ilm2, ilm3, ilm4,
+  type = "latex",
+  dep.var.labels = "Belief",
+  column.labels = c("Education", "Gender", "Income", "Age"),
+
+  digits = 3,
+  no.space = TRUE,
+  single.row = TRUE,
+  omit.stat = c("f", "ser"),
+
+  notes = "Interaction terms capture heterogeneous treatment effects.",
+  header = FALSE,
+  float = FALSE,
+  title = ""
+)
+
+cat("\\end{table}\n")
+```
+
+\newpage
+**Remark:** The interaction models from Table 7 suggest some evidence of heterogeneous treatment effects across subgroups. In particular, the treatment effect appears to be larger for individuals with higher levels of education (e.g., `high school`) compared to those with only elementary education. There is also some indication that the effect varies with `age`, with the magnitude of the effect tending to decrease as individuals get older, relative to the average treatment effect. However, this approach relies on specifying interaction terms ex ante, which requires assumptions about the functional form of heterogeneity. This is both restrictive and potentially incomplete, especially in the presence of multiple covariates and possible nonlinear interactions. Moreover, as discussed earlier, testing many interaction terms raises concerns related to multiple testing and limited empirical power.
+
+#### Causal tree method
+
+
+We therefore turn to machine learning methods focusing on *causal inference* for a more flexible estimation of treatment heterogeneity. We begin with the *causal tree* approach. Given the tree-based structure, we use categorical versions of the covariates as inputs. The idea is to partition the data into subgroups (*leaves*), each associated with its own estimated CATE. We first examine the causal tree results for `belief`.
+
+```{r causal-tree-belief, echo=FALSE}
+df_belief <- prep_data(datas_short, "y_belief_report_num", covars_num_no2)
+colnames(df_belief)[1] <- "y"
+
+n <- nrow(df_belief)
+
+set.seed(123)
+split <- sample(1:n, floor(n / 2))
+
+fold1 <- df_belief[split, ]
+fold2 <- df_belief[-split, ]
+
+set.seed(123)
+causal_tree_belief <- honest.causalTree(
+  y ~ .,
+  data = fold1,
+  treatment = fold1$d_treatment_source,
+  est_data = fold2,
+  est_treatment = fold2$d_treatment_source,
+  split.Rule = "CT",
+  split.Honest = TRUE,
+  cv.option = "CT",
+  cp = 0
+)
+
+ct.cptable <- as.data.frame(causal_tree_belief$cptable)
+cp.min <- which.min(ct.cptable$xerror)
+cp.idx <- which(ct.cptable$xerror - ct.cptable$xerror[cp.min] < ct.cptable$xstd)[1]
+cp.optimal <- ct.cptable$CP[cp.idx]
+
+ct.pruned <- prune(tree = causal_tree_belief, cp = cp.optimal)
+
+fold2$CATE_CT_pruned <- predict(ct.pruned, newdata = fold2)
+
+num.leaves <- length(unique(fold2$CATE_CT_pruned))
+fold2$leaf <- factor(
+  fold2$CATE_CT_pruned,
+  levels = sort(unique(fold2$CATE_CT_pruned)),
+  labels = seq(num.leaves)
+)
+
+fold2_belief_full <- fold2
+
+honest_ols_belief_full <- lm(
+  y ~ leaf + d_treatment_source * leaf - d_treatment_source - 1,
+  data = fold2_belief_full
+)
+
+causal_tree_table <- broom::tidy(honest_ols_belief_full) %>%
+  filter(str_detect(term, "d_treatment_source")) %>%
+  mutate(
+    Leaf = str_extract(term, "leaf\\d+") %>%
+      str_remove("leaf"),
+    Estimate = estimate,
+    `Std. Error` = std.error,
+    `t-statistic` = statistic,
+    `p-value` = p.value
+  ) %>%
+  select(Leaf, Estimate, `Std. Error`, `t-statistic`, `p-value`)
+
+knitr::kable(
+  causal_tree_table,
+  digits = 3,
+  caption = "Leaf-level treatment effects from the causal tree",
+  booktabs = TRUE
+)
+```
+
+**Remark:** The causal tree partitions the sample into multiple subgroups (*leaves*) as in Table 8, each associated with a distinct estimated treatment effect (CATE). The results show substantial heterogeneity, with treatment effects varying considerably across leaves, indicating that the average treatment effect masks important subgroup differences. Rather than interpreting leaf indices directly, these leaves should be understood as data-driven combinations of demographic characteristics (e.g., age, education, income). The variation in estimated effects across leaves suggests that individuals with different profiles respond differently to the source treatment. In particular, the dispersion of CATE estimates across leaves is consistent with earlier findings from interaction models, while providing a more flexible, nonparametric characterization of heterogeneity. This highlights the advantage of the causal tree approach in uncovering complex patterns without imposing a specific functional form.
+
+```{r causal-tree-leaves, echo=FALSE}
+selected_leaves <- c(1, 15, 18, 27, 28, 30, 31, 33)
+
+fold2_belief_sig <- fold2_belief_full[
+  fold2_belief_full$leaf %in% selected_leaves,
+]
+
+df_belief_num <- prep_data(datas_short, "y_belief_report_num", covars_num_no2)
+
+fold2_num_sig <- df_belief_num[-split, ][
+  fold2_belief_full$leaf %in% selected_leaves,
+]
+
+ct_correlation_table <- tibble(
+  Variable = c("Age", "Education", "Gender", "Income"),
+  Correlation = c(
+    cor(fold2_belief_sig$CATE_CT_pruned, fold2_num_sig$x_age, use = "complete.obs"),
+    cor(fold2_belief_sig$CATE_CT_pruned, fold2_num_sig$x_education_num, use = "complete.obs"),
+    cor(fold2_belief_sig$CATE_CT_pruned, fold2_num_sig$x_sex_num, use = "complete.obs"),
+    cor(fold2_belief_sig$CATE_CT_pruned, fold2_num_sig$x_income_num, use = "complete.obs")
+  )
+) %>%
+  mutate(Correlation = round(Correlation, 3))
+
+knitr::kable(
+  ct_correlation_table,
+  caption = "Correlation between causal-tree CATE and demographic variables",
+  booktabs = TRUE
+)
+```
+
+**Remark:** The results from Table 9 suggest that, among the individuals for whom the causal tree captures heterogeneous treatment effects, `age` and `education` are negatively correlated with the estimated CATE. This implies that older and more educated individuals may be relatively more skeptical of the news report. The correlation with `gender` is very small, suggesting little difference between men and women in this subgroup. In contrast, `income` is positively correlated with the estimated CATE. Compared with the interaction models, the causal tree gives partly similar evidence for heterogeneity by `age` and `gender`, while also suggesting that `education` and `income` may play a more visible role in shaping heterogeneous treatment effects.
+
+```{r causal-tree-loops, include=FALSE}
+run_causal_tree <- function(outcome_var) {
+  model_data <- prep_data(datas_short, outcome_var, covars_num_no2)
+  colnames(model_data)[1] <- "y"
+
+  n <- nrow(model_data)
+
+  set.seed(123)
+  split_index <- sample(1:n, floor(n / 2))
+
+  training_sample <- model_data[split_index, ]
+  estimation_sample <- model_data[-split_index, ]
+
+  causal_tree <- honest.causalTree(
+    y ~ .,
+    data = training_sample,
+    treatment = training_sample$d_treatment_source,
+    est_data = estimation_sample,
+    est_treatment = estimation_sample$d_treatment_source,
+    split.Rule = "CT",
+    split.Honest = TRUE,
+    cv.option = "CT",
+    cp = 0
+  )
+
+  cp_table <- as.data.frame(causal_tree$cptable)
+  cp_min <- which.min(cp_table$xerror)
+  cp_index <- which(cp_table$xerror - cp_table$xerror[cp_min] < cp_table$xstd)[1]
+  cp_optimal <- cp_table$CP[cp_index]
+
+  pruned_tree <- prune(tree = causal_tree, cp = cp_optimal)
+
+  estimation_sample$CATE_CT_pruned <- predict(
+    pruned_tree,
+    newdata = estimation_sample
+  )
+
+  estimation_sample
+}
+
+models_ct <- lapply(outcomes, run_causal_tree)
+names(models_ct) <- outcomes
+```
+The causal-tree analysis is extended to all outcome variables for consistency. However, the main interpretation of treatment heterogeneity remains focused on `belief`, because the sharing outcomes are binary and less stable across platforms. In addition, causal trees can be sensitive to sample splitting and pruning choices, so their subgroup estimates should be interpreted as exploratory rather than definitive.
+
+#### A Meta-Learner method
+
+
+We consider another approach called *meta-learner*, starting with the *T-learner*. Before estimation, we check the balance between the control and treatment subsamples. This helps assess whether the simple T-learner setup is reasonable, or whether an alternative such as the *X-learner* may be more appropriate.
+\newpage
+```{r t-learner-balance, echo=FALSE}
+df_belief_CATE_2L <- prep_data(datas_short, "y_belief_report_num", covars_num_no2)
+
+t_learner_balance <- df_belief_CATE_2L %>%
+  count(d_treatment_source) %>%
+  mutate(
+    Group = ifelse(d_treatment_source == 1, "Treatment", "Control")
+  ) %>%
+  select(Group, N = n)
+
+knitr::kable(
+  t_learner_balance,
+  caption = "Sample size balance for T-learner estimation",
+  booktabs = TRUE
+)
+```
+
+The sample sizes are sufficiently close for a basic *T-learner* implementation. We also experimented with pruning and optimal tree selection which not intentionally to be included in this report, but this did not provide a clear improvement for individual-level CATE estimation. Therefore, we proceed with a simple tree-based T-learner using the default complexity parameter as an exploratory specification.
+<!-- my old comment -->
+<!-- we tested optimal tree but be suspicious with this approach since considering metadata (not real) seems not representative for real data. Estimated the optimal tree and can't yield CTE individual level. Hence, we move on with picking default cp value which is 0.01 -->
+
+```{r t-learner, include=FALSE}
+X1 <- df_belief_CATE_2L %>% mutate(d_treatment_source = 1)
+X0 <- df_belief_CATE_2L %>% mutate(d_treatment_source = 0)
+
+set.seed(123)
+n <- nrow(df_belief_CATE_2L)
+split <- sample(1:n, floor(n * 0.7))
+
+subset_train <- df_belief_CATE_2L[split, ]
+subset_test  <- df_belief_CATE_2L[-split, ]
+
+# Outcome model for treated observations
+tf1 <- rpart(
+  y_belief_report_num ~ .,
+  data = df_belief_CATE_2L[df_belief_CATE_2L$d_treatment_source == 1, ],
+  cp = 0.001,
+  method = "anova"
+)
+
+# Outcome model for control observations
+tf0 <- rpart(
+  y_belief_report_num ~ .,
+  data = df_belief_CATE_2L[df_belief_CATE_2L$d_treatment_source == 0, ],
+  cp = 0.001,
+  method = "anova"
+)
+
+df_belief_CATE_2L$CATE_2L <- predict(tf1, X1) - predict(tf0, X0)
+```
+
+```{r t-learner-plots, echo=FALSE, fig.cap="Estimated treatment heterogeneity from the T-learner", fig.width=7, fig.height=4.8}
+df <- df_belief_CATE_2L %>%
+  mutate(
+    x_education_fac = datas_short$x_education_fac[as.numeric(rownames(df_belief_CATE_2L))],
+    x_income_fac = datas_short$x_income_fac[as.numeric(rownames(df_belief_CATE_2L))]
+  )
+
+plot_age <- ggplot(df, aes(x = x_age, y = CATE_2L)) +
+  geom_point(alpha = 0.15, size = 0.6) +
+  geom_smooth(method = "loess", se = FALSE, linewidth = 0.6) +
+  labs(title = "Age", x = NULL, y = NULL) +
+  theme_minimal(base_size = 9)
+
+plot_education <- ggplot(df, aes(x = x_education_fac, y = CATE_2L)) +
+  geom_boxplot(width = 0.5, outlier.alpha = 0.25) +
+  labs(title = "Education", x = NULL, y = NULL) +
+  theme_minimal(base_size = 9) +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1, size = 7))
+
+plot_gender <- ggplot(df, aes(x = factor(x_sex_num), y = CATE_2L)) +
+  geom_boxplot(width = 0.45, outlier.alpha = 0.25) +
+  scale_x_discrete(labels = c("Female", "Male")) +
+  labs(title = "Gender", x = NULL, y = NULL) +
+  theme_minimal(base_size = 9)
+
+plot_income <- ggplot(df, aes(x = x_income_fac, y = CATE_2L)) +
+  geom_boxplot(width = 0.5, outlier.alpha = 0.25) +
+  labs(title = "Income", x = NULL, y = NULL) +
+  theme_minimal(base_size = 9) +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1, size = 6))
+
+plots_combined <- ggpubr::ggarrange(
+  plot_age, plot_education,
+  plot_gender, plot_income,
+  ncol = 2,
+  nrow = 2
+)
+
+ggpubr::annotate_figure(
+  plots_combined,
+  left = ggpubr::text_grob("Estimated treatment effect", rot = 90, size = 9)
+)
+```
+
+**Remark:** From Figure 3, the smoothed trend for `age`, suggests that the estimated treatment effect is lower among older individuals, although the pattern fluctuates across age groups. This is broadly consistent with the idea that nonlinear age effects may matter, as also reflected in the interaction and quadratic specifications. For `gender`, there is little visible dispersion between the two groups, suggesting limited heterogeneity along this dimension. For `income`, the individual effects do not deviate strongly from the average effect, which is partly consistent with the LMI results. However, some variation across income groups remains, with lower estimated effects around the middle-income range and higher effects among some higher-income groups. For `education`, the estimated effect appears to increase up to a certain level before declining, which differs somewhat from the LMI results. Overall, these patterns should be interpreted cautiously. The T-learner estimates depend on the specific tree configuration and do not provide standard errors for individual-level effects, so the results are best viewed as exploratory rather than definitive.
+<!-- old comment
+for age, we notice that with the smooth red line, the oldest people have lowest effect, while there is fluctuation pattern across ages, could affect a little bit of the effect modelled by adding squared age in LM with interaction terms (LMI). For sex, there is no dispersion in effects between 2 groups. For income, the results suggest that individual effects are not different much from the CATE, which could agree with the result form LMI to some extent. But individual-wise, effects vary across different income groups, with the lowest for *1001 to 1500euro*, highest for *4001 to 4500euro*. Regarding education, we could see increasing trend in effect evolution, but peaking at Tech high school, and then drops. Compare to LMI, which doesn't state the same. Overall, these evolutions hold only for this tree with this configuration. So randomness decides, without SE, asymptotic converging matter for inference. We can't say that the effects are realistic. -->
+
+#### Double Machine Learning method
+
+
+Finally, we apply *Double Machine Learning* as an additional approach to estimate treatment effects. This method allows us to control flexibly for the relationship between covariates, treatment assignment, and outcomes. We use gradient boosting to estimate the nuisance functions `g` and `m` under the default configuration. The results are used mainly as a robustness check and as an exploratory tool for treatment heterogeneity.
+
+```{r double-ml, include=FALSE, results='hide'}
+run_double_ml <- function(outcome_var) {
+  model_data <- prep_data(datas_short, outcome_var, covars_num_no2)
+
+  data_dml <- DoubleMLData$new(
+    model_data,
+    y_col = outcome_var,
+    d_cols = "d_treatment_source",
+    x_cols = covars_num_no2
+  )
+
+  ml_g <- lrn("regr.gbm")
+  ml_m <- lrn("classif.gbm")
+
+  set.seed(1234)
+  dml_irm <- DoubleMLIRM$new(data_dml, ml_g = ml_g, ml_m = ml_m)
+  dml_irm$fit()
+
+  dml_irm
+}
+
+models_dml <- lapply(outcomes, run_double_ml)
+names(models_dml) <- outcomes
+```
+
+```{r double-ml-plots, echo=FALSE, fig.cap="Distribution of Double ML treatment scores", fig.width=7, fig.height=4.5}
+dml_plot_data <- bind_rows(lapply(outcomes, function(y) {
+  data.frame(
+    Outcome = case_when(
+      y == "y_belief_report_num" ~ "Belief",
+      y == "y_share_report_email_num" ~ "Email sharing",
+      y == "y_share_report_fb_num" ~ "Facebook sharing",
+      y == "y_share_report_twitter_num" ~ "Twitter sharing",
+      y == "y_share_report_whatsapp_num" ~ "WhatsApp sharing"
+    ),
+    Treatment_score = models_dml[[y]]$psi_b
+  )
+}))
+
+ggplot(dml_plot_data, aes(x = Treatment_score)) +
+  geom_histogram(bins = 35, fill = "grey75", color = "white") +
+  facet_wrap(~ Outcome, scales = "free", ncol = 2) +
+  labs(
+    x = "Estimated treatment score",
+    y = NULL
+  ) +
+  theme_minimal(base_size = 9) +
+  theme(
+    strip.text = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+```
+
+**Remark:** The Double ML estimates are broadly similar to the simple linear regression estimates, suggesting that the average source effect is reasonably stable across methods. However, the distributions of estimated treatment scores show some variation across outcomes. For some sharing outcomes, the distributions appear more dispersed or bimodal, while the distribution for `belief` is more concentrated. These results should be interpreted cautiously. The estimated individual-level scores may fall outside the natural scale of the original outcomes, and standard errors are not directly available for each individual score. Therefore, the Double ML results are used mainly as an exploratory check on treatment heterogeneity rather than as definitive individual-level causal estimates. This concludes the heterogeneity analysis.
+
+# Conclusion
+The Table 11 summarizes the estimated treatment effects across all methods used in the analysis.
+For `belief`, all methods produce a positive effect of source credibility. The estimates are broadly similar, although the causal tree produces the largest average leaf-level estimate and Double ML produces the smallest estimate. For `email sharing` and `Twitter sharing`, the estimated effects are generally weak and statistically insignificant across methods. This suggests limited evidence that source credibility affects sharing through these channels. For `Facebook sharing`, the simple regression and Double LASSO estimates suggest a positive effect, while the Double ML estimate is weaker. This indicates that the Facebook result is less robust once more flexible adjustment is introduced. For `WhatsApp sharing`, the simple regression and Double LASSO estimates are positive, while the causal tree and Double ML estimates are weaker or negative. Overall, the evidence for sharing behavior is more mixed than the evidence for belief.
+
+```{r final-cate-table, echo=FALSE}
+generate_summary_table <- function(outcome_name, slr_mod, dlasso_mod, ct_data, dml_mod) {
+  data.frame(
+    Outcome = outcome_name,
+    Method = c("SLR / t-test", "Double LASSO", "Causal tree", "Double ML"),
+    Estimate = c(
+      slr_mod$coefficients["d_treatment_source"],
+      dlasso_mod$coefficient,
+      if (!is.null(ct_data)) mean(ct_data$CATE_CT_pruned, na.rm = TRUE) else NA,
+      dml_mod$coef
+    ),
+    T_statistic = c(
+      summary(slr_mod)$coefficients["d_treatment_source", "t value"],
+      dlasso_mod$t,
+      NA,
+      dml_mod$t_stat
+    ),
+    row.names = NULL
+  )
+}
+
+final_summary <- bind_rows(
+  generate_summary_table("Belief", models_slr$y_belief_report_num, models_dlasso$y_belief_report_num, models_ct$y_belief_report_num, models_dml$y_belief_report_num),
+  generate_summary_table("Email sharing", models_slr$y_share_report_email_num, models_dlasso$y_share_report_email_num, models_ct$y_share_report_email_num, models_dml$y_share_report_email_num),
+  generate_summary_table("Facebook sharing", models_slr$y_share_report_fb_num, models_dlasso$y_share_report_fb_num, models_ct$y_share_report_fb_num, models_dml$y_share_report_fb_num),
+  generate_summary_table("Twitter sharing", models_slr$y_share_report_twitter_num, models_dlasso$y_share_report_twitter_num, models_ct$y_share_report_twitter_num, models_dml$y_share_report_twitter_num),
+  generate_summary_table("WhatsApp sharing", models_slr$y_share_report_whatsapp_num, models_dlasso$y_share_report_whatsapp_num, models_ct$y_share_report_whatsapp_num, models_dml$y_share_report_whatsapp_num)
+) %>%
+  mutate(
+    Estimate = round(Estimate, 3),
+    T_statistic = round(T_statistic, 3)
+  )
+
+knitr::kable(
+  final_summary,
+  caption = "Treatment effect estimates across methods",
+  booktabs = TRUE,
+  col.names = c("Outcome", "Method", "Estimate", "t-statistic")
+)
+```
+<!-- my old comment: -->
+<!-- 5 summary tables, capturing each dependent variable.  -->
+
+<!-- 1. Belief: -->
+<!-- All 4 models yield almost the same results, and all of them (except Causal Tree, doesn't report t_stat, also manifest largest CATE) are statistically significant. with DoubleML, we got smallest effect. -->
+
+<!-- 2. Email -->
+<!-- Causal Tree shows negative effect without SE, T-test and DoubleLasso have almost the same results, DoubleML's CATE is twice bigger. But all the results are not significant, as t-stat is < 2. Hence, we have null CATE. -->
+
+<!-- 3. Facebook -->
+<!-- Only T-test and Double Lasso give statistically significant effects. While Causal Tree reports lowest CATE with no SE. Furthermore,nonlinear taken into account, DoubleML says insignificant difference from being in treatment group to control group. -->
+
+
+<!-- 4. Twitter -->
+<!-- All 4 reported CATE are statistically insignificant consistent with T-test. -->
+
+<!-- 5. WhatsApp -->
+<!-- T-test and Double Lasso yieled significant effects, while Causal tree reports insignificant, negative CATE. DoubleML’s effect is null.  -->
+
+From these results, we revisit our hypotheses. **H1a** is strongly supported: both conventional econometric methods and modern machine learning approaches consistently show that individuals are more likely to believe news from real sources than from fake ones. For **H1b**, the evidence is weaker. The Double ML results suggest no clear causal relationship between exposure to a news source and the willingness to share across channels. In contrast, simple OLS specifications indicate some positive effects, particularly for Facebook and WhatsApp, highlighting that these results are sensitive to the modeling approach.
+
+With the rise of the Internet and social media, the number of information sources has expanded rapidly. A key concern is that unreliable actors can easily imitate legitimate sources. In this project, we examine how source characteristics influence individuals’ belief in news reports and their intention to share them. Consistent with our first hypothesis, individuals exhibit stronger belief in reports from real sources. However, the link between belief and sharing behavior is less clear and appears to be channel-dependent. We also find evidence of heterogeneous effects on belief. These differences appear to be driven by nonlinear relationships with demographic characteristics. For example, older individuals tend to be more skeptical, while gender does not show meaningful variation in treatment effects. The results across methods are partly consistent: some patterns (e.g., limited gender heterogeneity) are robust across LMI, causal trees, and T-learners, while others differ depending on the method. For instance, the T-learner suggests an increasing effect with education, whereas the causal tree indicates a negative association. Similarly, for income, LMI and T-learner suggest limited heterogeneity, while the causal tree points to a positive relationship.
+
+Several limitations of our analysis suggest directions for future research. Sharing decisions are influenced by additional factors such as newsworthiness, informational value, emotional content, and framing, which may play a smaller role in belief formation. This may explain why the results for belief and sharing differ. In addition, sharing outcomes are only observed for users of specific platforms, resulting in smaller sample sizes, particularly for Twitter.
+
+Finally, we compare CATE estimates across conventional and machine learning approaches, including Double ML, to assess robustness. While the average effects are relatively stable, the heterogeneity results depend on the chosen method. Overall, our findings have implications for the spread of misinformation. Online platforms play a central role in directing users to content, including potentially misleading sources. Once a source is identified as unreliable, limiting user exposure to such content may help reduce the spread of misinformation.
+
+
+<!-- old comments -->
+<!-- From this, we can once again recheck our hypotheses. **H1a** is proved as expected by both conventional and modern techniques. -->
+<!-- **H1b** no causal relationship of facing news to willingness to share across all channels reported by applying DoubleML method following the FWL theorem. But, OLS says different. -->
+
+<!-- With the advent of the Internet and social media, the number of sources of information has multiplied. A worrying aspect is that some companies can easily mimic legitimate sources. In our project, we investigate how source characteristics affect people’s belief that news reports are true and their intention to share the report. -->
+
+<!-- In line with our first hypothesis, we find that individuals have a stronger belief in the report by a real source than by fake one. And suspicion in causation leading to intention to share it, at least provable via Facebook and Whatsapp. -->
+
+<!-- We show that the effects on belief may vary across individuals driven by nonlinear dynamics of characteristics like age (more media skeptics as people get older), or no similar effects for both male and female. These effects are justified by many causation ML modes, in some features all models agree (Causal Tree and T learner along with LMI agree on sex), while in some, we have models pointing at different direction. For example, upward trending in shooling with T leaner,negative correlation between education and Treatment effect captured by Causal Tree. For income, LMI and T learner agree that seemingly, no treatment heterogeneity exist with some level of significance, while Causal Tree reports positive correlation. -->
+
+<!-- Several details and limitations of our experiment open avenues for future research. Sharing decisions are affected by various factors that may be less important for belief, such as an item’s newsworthiness, informational utility, valence, and framing. This could be one reason why our results for belief and sharing intentions differ. -->
+<!-- Moreover, we only measured sharing outcomes for users of the respective platforms. Hence, sample sizes for the analyses of sharing intention were much smaller. This was especially the case for Twitter. However, we note that the findings for Facebook seem robust despite a smaller sample size.  -->
+
+<!-- We also cross checked the CATE estimated by conventional approach and emerging ML techniques to discover causation such as DoubleML. -->
+
+<!-- Our findings have implications for the spread of misinformation on social media. Platforms play a key role in directing users to fake-news websites. Once a source has been identified as questionable by a platform, further contact between source and user should be cut off. -->
+
+
+# References
+
+1. Athey, Susan, and Guido W Imbens. 2017. “The Econometrics of Randomized Experiments.” In Handbook of Economic Field Experiments, 1:73–140. Elsevier.
+2. Athey, Susan, and Guido Imbens. 2016. “Recursive Partitioning for Heterogeneous Causal Effects.” Proceedings of the National Academy of Sciences 113 (27): 7353–60. https://doi. org/https://doi.org/10.1073/pnas.1510489113.
+3. Wager, Stefan, and Susan Athey. 2018. “Estimation and Inference of Heterogeneous Treat- ment Effects Using Random Forests.” Journal of the American Statistical Association 113 (523): 1228–42. https://doi.org/https://doi.org/10.1080/01621459.2017.1319839.
+4. Athey, Susan, and Stefan Wager. 2019. “Estimating Treatment Effects with Causal Forests: An Application.” http://arxiv.org/abs/1902.07409.
+5. Hargittai, Eszter, and Gina Walejko. 2008. “The Participation Divide: Content Creation and Sharing in the Digital Age.” Inf. Commun. Soc. 11 (2): 239–56.
+6. Hargittai, Eszter, and Gina Walejko. 2008. “The Participation Divide: Content Creation and Sharing in the Digital Age.” Inf. Commun. Soc. 11 (2): 239–56.
+7. American Press Institute. 2017. “’My’ Media Versus ’the’ Media: Trust in News Depends on Which News Media You Mean.”
+8. YouGov. 2017. “Reuters 2017.”
+9. PricewaterhouseCoopers. 2018. “Vertrauen in Medien 2018.”
+10. Gunther, Albert C. 1992. “Biased Press or Biased Public? Attitudes Toward Media Coverage of Social Groups.” Public Opinion Quarterly 56 (2): 147.
+11. Metzger, Miriam J., Andrew J. Flanagin, Keren Eyal, Daisy R. Lemus, and Robert McCann. 2003. “Credibility in the 21st Century: Integrating Perspectives on Source, Message, and Media Credibility in the Contemporary Media Environment.” In Communication Yearbook 27, edited by Pamela Kalbfleisch, 293–335. Mahwah, NJ: Lawrence Erlbaum.
+12. Fogg, B J, Jonathan Marshall, Othman Laraki, Alex Osipovich, Chris Varma, Nicholas Fang, Jyoti Paul, et al. 2001. “What Makes Web Sites Credible? A Report on a Large Quantitative Study Chi 2001.” In Proceedings of the Sigchi Conference on Human Factors in Computing Systems., 3:61–68. 1.
+13. Kahan, Dan M. 2013. “Ideology, Motivated Reasoning, and Cognitive Reflection.” Judgment and Decision Making 8 (4): 407–24.
+14. Tappin, Ben M., Gordon Pennycook, and David G Rand. 2018. “Rethinking the Link Between Cognitive Sophistication and Identity-Protective Bias in Political Belief Formation.”
