@@ -51,13 +51,15 @@ Padua_CausalML_project/
 ```
 Main Files:
 report/main_report.Rmd — main reproducible analysis file
+
 report/final_report.pdf — compiled report
+
 data/fakenewsdata.csv — dataset used in the analysis
 
 The report is written in R Markdown and can be reproduced by running:
 rmarkdown::render("report/main_report.Rmd")
 
-##Required R packages include:
+## Required R packages include:
 
 tidyverse
 stargazer
