@@ -243,6 +243,36 @@ Following the literature, we decide to include quadratic transformation of \text
 
 ## Statistical Modelling and Analysis
 
+Let us recall some necessary notions, let \(Y_i(1)\) and \(Y_i(0)\) denote the potential outcomes for individual \(i\) under exposure to a real source and a fake source, respectively. The treatment indicator is denoted by \(D_i\), where \(D_i = 1\) corresponds to the real-source treatment and \(D_i = 0\) corresponds to the fake-source control condition.
+
+The main causal estimand is the average treatment effect, that is whether real-source exposure changes belief and sharing behavior on average:
+
+\[
+ATE = \mathbb{E}[Y_i(1) - Y_i(0)].
+\]
+
+To study treatment heterogeneity, that is whether the treatment effect differs across demographic profiles, we also consider the conditional average treatment effect:
+
+\[
+CATE(x) = \mathbb{E}[Y_i(1) - Y_i(0) \mid X_i = x],
+\]
+
+where \(X_i\) denotes observed demographic characteristics such as age, education, gender, and income.
+
+Because the treatment is experimentally assigned, identification relies on the random assignment assumption:
+
+\[
+(Y_i(1), Y_i(0)) \perp D_i \mid X_i.
+\]
+
+Under overlap,
+
+\[
+0 < \mathbb{P}(D_i = 1 \mid X_i = x) < 1,
+\]
+
+differences in outcomes between treated and control individuals can be interpreted causally. Covariates are included mainly to improve precision and to explore heterogeneous treatment effects rather than to solve selection bias. 
+
 The empirical analysis combines *conventional econometric methods* with modern *causal machine learning* techniques. We first estimate average treatment effects using *simple linear regression, multiple linear regression, logistic regression* for binary sharing outcomes, and *LASSO-based* methods. We then examine treatment heterogeneity, focusing mainly on the belief outcome, using *causal trees, T-learners, and Double Machine Learning*. The final summary table compares the estimated conditional average treatment effects across these approaches, highlighting how conventional econometric estimates relate to more flexible machine learning-based methods.
 
 ### Conventional Econometric methods
@@ -289,9 +319,31 @@ names(models_slr) <- outcomes
 se_slr <- lapply(models_slr, get_robust_se)
 ```
 
+The baseline specification is a simple linear model:
+
+\[
+Y_i = \alpha + \tau D_i + \varepsilon_i,
+\]
+
+where \(Y_i\) is the outcome of interest and \(\tau\) captures the average source treatment effect. We then add demographic controls:
+
+\[
+Y_i = \alpha + \tau D_i + X_i'\beta + \varepsilon_i.
+\]
+
+To allow for nonlinear relationships between controls and outcomes, we also estimate an extended specification:
+
+\[
+Y_i = \alpha + \tau D_i + X_i'\beta + Q_i'\gamma + \varepsilon_i,
+\]
+
+where \(Q_i\) includes squared terms for age, education, and income. Throughout the linear models, standard errors are adjusted using the HC1 heteroskedasticity-robust correction. We do not account for serial correlation, as the data do not exhibit any clear clustered or panel structure.
+
 We begin by estimating simple linear regressions and conducting t-tests to examine our hypotheses. These methods allow us to assess whether differences in average belief and sharing intentions between the two groups are statistically significant. The results provide strong support for *H1a*, while the evidence for *H1b* is more mixed.
 
-**Remark:** As shown in Table 3, the estimates indicate a positive and statistically significant average treatment effect of approximately 0.62 on `belief`. We also observe a positive and significant effect for `Facebook` sharing, suggesting that being in the *treatment* group increases the probability of sharing via `Facebook` by about 5 percentage points. In addition, the t-test for `WhatsApp` sharing shows a significant effect. In contrast, the estimated effect on `email` sharing is not statistically different from zero. For `Twitter`, where the number of observations is relatively limited, no significant treatment effect is detected. Throughout the analysis, we adjust standard errors for heteroskedasticity using the HC1 correction. We do not account for serial correlation, as the data do not exhibit any clear clustered or panel structure.
+**Remark:** As shown in Table 3, the estimates indicate a positive and statistically significant average treatment effect of approximately 0.62 on `belief`. We also observe a positive and significant effect for `Facebook` sharing, suggesting that being in the *treatment* group increases the probability of sharing via `Facebook` by about 5 percentage points. In addition, the t-test for `WhatsApp` sharing shows a significant effect. In contrast, the estimated effect on `email` sharing is not statistically different from zero. For `Twitter`, where the number of observations is relatively limited, no significant treatment effect is detected. 
+<!-- current comment
+Throughout the analysis, we adjust standard errors for heteroskedasticity using the HC1 correction. We do not account for serial correlation, as the data do not exhibit any clear clustered or panel structure. -->
 
 ```{r logit-vs-lpm, echo=FALSE, fig.cap="Logit and LPM comparison for Facebook sharing", fig.width=4.8, fig.height=1.8}
 df_fb <- prep_data(datas_short, "y_share_report_fb_num", covars_num_no2)
@@ -339,6 +391,7 @@ ggplot(df_fb, aes(x = factor(d_treatment_source), y = y_share_report_fb_num)) +
   )
 ```
 **Remark:** Since the sharing intention variables are binary, a *logistic regression model* may be more appropriate than a *linear probability model*. We perhaps give a illustration for the comparison between the *linear probability model* and the *logit model* for `Facebook sharing` in Figure 2, which unsurprisingly similar predicted probabilities are shown across the control and treatment groups. Since the coefficient estimates from the *logit model* are less straightforward to interpret, we continue using the *linear probability model* in the main analysis for ease of interpretation.
+\newpage
 
 ```{r corrolation-test, echo=FALSE}
 cor_results <- tibble(
@@ -389,8 +442,18 @@ se_mlr2 <- lapply(models_mlr2, get_robust_se)
 
 #### LASSO regression methods
 
+As a final step in the linear econometric model section, we estimate LASSO-based specifications. Standard LASSO solves the penalized least-squares problem
 
-As a final step in the linear econometric model section, we additionally estimate a *LASSO specifications*. The purpose is to select a parsimonious set of covariates while still allowing the model to capture relevant linear relationships among the controls. A limitation of *standard LASSO* is that some coefficients may be shrunk exactly to zero. In this application, the *treatment effect* for `Twitter sharing` is not retained in the *Post-LASSO* specification, in particular, having estimates are `null`. To address this issue, we also estimate a *Double LASSO* model, where the *treatment* variable is forced into the estimation procedure. Table 5 summarizes the estimated treatment effects from the simple linear regression, multiple linear regression, Post-LASSO, and Double LASSO specifications.
+\[
+\min_{\beta} \left\{ \frac{1}{n}\sum_{i=1}^{n}(Y_i - X_i'\beta)^2 + \lambda \sum_{j=1}^{p}|\beta_j| \right\}.
+\]
+
+The penalty term encourages sparse models by shrinking some coefficients exactly to zero. This is useful for variable selection, but it can be problematic for causal inference if the treatment variable or important confounders are removed. For this reason, we also use Double LASSO. The idea is to select controls that predict the outcome and controls that predict the treatment assignment, then estimate the treatment effect using the union of selected controls. This protects the treatment-effect estimate from purely prediction-oriented variable selection.
+
+In this project, LASSO is used mainly as a robustness check against the ordinary linear models. Table 5 summarizes the estimated treatment effects from the simple linear regression, multiple linear regression, Post-LASSO, and Double LASSO specifications.
+
+<!-- current comment
+As a final step in the linear econometric model section, we additionally estimate a *LASSO specifications*. The purpose is to select a parsimonious set of covariates while still allowing the model to capture relevant linear relationships among the controls. A limitation of *standard LASSO* is that some coefficients may be shrunk exactly to zero. In this application, the *treatment effect* for `Twitter sharing` is not retained in the *Post-LASSO* specification, in particular, having estimates are `null`. To address this issue, we also estimate a *Double LASSO* model, where the *treatment* variable is forced into the estimation procedure.  -->
 
 ```{r lasso, include=FALSE}
 # Post-LASSO estimation
@@ -531,7 +594,16 @@ knitr::kable(
 **Remark:** Overall, the Double LASSO estimate for `belief` in Table 6 is close to the estimates obtained from the linear regression specifications from Table 5 and remains statistically significant. In comparison, the simple linear regression tends to produce larger estimated effects for `belief`, `email sharing`, and `Facebook sharing`, while Double LASSO produces a relatively larger estimate for `WhatsApp sharing`.
 
 ### Causal Machine Learning methods
-*Treatment heterogeneity* can be examined more flexibly using causal machine learning methods. However, before moving to these methods, we first demonstrate a conventional econometric approach. In the literature, heterogeneous treatment effects are often studied by interacting the treatment variable with demographic characteristics. Here, we use linear models with *interaction terms* (LMI) as a baseline approach. Specifically, we interact the source treatment with selected demographic variables to examine whether the effect on `belief` differs across subgroups.
+*Treatment heterogeneity* can be examined more flexibly using causal machine learning methods. However, before moving to these methods, we first demonstrate a conventional econometric approach. 
+<!-- current comment
+In the literature, heterogeneous treatment effects are often studied by interacting the treatment variable with demographic characteristics. Here, we use linear models with *interaction terms* (LMI) as a baseline approach.  -->
+To examine treatment heterogeneity using a conventional econometric approach, we estimate linear models with *interaction terms*. A simple interaction specification takes the form
+
+\[
+Y_i = \alpha + \tau D_i + X_i'\beta + D_i X_i'\delta + \varepsilon_i.
+\]
+
+The interaction coefficient \(\delta\) captures how the treatment effect changes with observed characteristics. This approach is transparent and easy to interpret, but it requires the researcher to specify the relevant interactions in advance. Specifically, we interact the source treatment with selected demographic variables to examine whether the effect on `belief` differs across subgroups.
 
 ```{r lmi-models, echo=FALSE, results='asis'}
 df_belief_cat <- prep_data(datas_short, "y_belief_report_num", covars_cat_no2)
@@ -583,8 +655,7 @@ cat("\\end{table}\n")
 
 #### Causal tree method
 
-
-We therefore turn to machine learning methods focusing on *causal inference* for a more flexible estimation of treatment heterogeneity. We begin with the *causal tree* approach. Given the tree-based structure, we use categorical versions of the covariates as inputs. The idea is to partition the data into subgroups (*leaves*), each associated with its own estimated CATE. We first examine the causal tree results for `belief`.
+*Causal trees* estimate heterogeneous treatment effects by recursively partitioning the covariate space. Instead of imposing a global linear relationship, the algorithm searches for subgroups in which treatment effects differ. Each *terminal node*, or *leaf*, corresponds to a data-driven subgroup with its own estimated CATE. The main advantage is flexibility: causal trees can capture nonlinearities and interactions without explicitly specifying them. We use the honest estimation framework, where the sample is split into a training subsample used to construct the tree and an estimation subsample used to estimate treatment effects within each leaf. This reduces overfitting and improves the validity of treatment effect estimation. We first examine the causal tree results for `belief`.
 
 ```{r causal-tree-belief, echo=FALSE}
 df_belief <- prep_data(datas_short, "y_belief_report_num", covars_num_no2)
@@ -654,7 +725,8 @@ knitr::kable(
 )
 ```
 
-**Remark:** The causal tree partitions the sample into multiple subgroups (*leaves*) as in Table 8, each associated with a distinct estimated treatment effect (CATE). The results show substantial heterogeneity, with treatment effects varying considerably across leaves, indicating that the average treatment effect masks important subgroup differences. Rather than interpreting leaf indices directly, these leaves should be understood as data-driven combinations of demographic characteristics (e.g., age, education, income). The variation in estimated effects across leaves suggests that individuals with different profiles respond differently to the source treatment. In particular, the dispersion of CATE estimates across leaves is consistent with earlier findings from interaction models, while providing a more flexible, nonparametric characterization of heterogeneity. This highlights the advantage of the causal tree approach in uncovering complex patterns without imposing a specific functional form.
+
+**Remark:** The causal tree partitions the sample into multiple subgroups (*leaves*) as in Table 8, each associated with a distinct estimated treatment effect (CATE). The results show substantial heterogeneity, with treatment effects varying considerably across leaves, indicating that the average treatment effect masks important subgroup differences. However, tree-based estimates can be sensitive to sample splitting, pruning choices, and small leaf sizes. Therefore, rather than interpreting leaf indices directly, these leaves should be understood as data-driven combinations of demographic characteristics (e.g., age, education, income). The variation in estimated effects across leaves suggests that individuals with different profiles respond differently to the source treatment. In particular, the dispersion of CATE estimates across leaves is consistent with earlier findings from interaction models, while providing a more flexible, nonparametric characterization of heterogeneity. This highlights the advantage of the causal tree approach in uncovering complex patterns without imposing a specific functional form.
 
 ```{r causal-tree-leaves, echo=FALSE}
 selected_leaves <- c(1, 15, 18, 27, 28, 30, 31, 33)
@@ -735,9 +807,23 @@ names(models_ct) <- outcomes
 The causal-tree analysis is extended to all outcome variables for consistency. However, the main interpretation of treatment heterogeneity remains focused on `belief`, because the sharing outcomes are binary and less stable across platforms. In addition, causal trees can be sensitive to sample splitting and pruning choices, so their subgroup estimates should be interpreted as exploratory rather than definitive.
 
 #### A Meta-Learner method
+We consider another approach called *meta-learner*, starting with the *T-learner*. The method estimates treatment heterogeneity by fitting two separate outcome models:
 
+\[
+\mu_1(x) = \mathbb{E}[Y_i \mid D_i = 1, X_i = x],
+\]
 
-We consider another approach called *meta-learner*, starting with the *T-learner*. Before estimation, we check the balance between the control and treatment subsamples. This helps assess whether the simple T-learner setup is reasonable, or whether an alternative such as the *X-learner* may be more appropriate.
+\[
+\mu_0(x) = \mathbb{E}[Y_i \mid D_i = 0, X_i = x].
+\]
+
+The individual-level treatment effect is then estimated as
+
+\[
+\hat{\tau}(x) = \hat{\mu}_1(x) - \hat{\mu}_0(x).
+\]
+
+In this project, we use tree-based learners for both treated and control outcome models. The T-learner is intuitive and easy to implement, but it can be unstable when treatment and control sample sizes are very different. Before estimation, we check the balance between the control and treatment subsamples. This helps assess whether the simple T-learner setup is reasonable, or whether an alternative such as the *X-learner* may be more appropriate.
 \newpage
 ```{r t-learner-balance, echo=FALSE}
 df_belief_CATE_2L <- prep_data(datas_short, "y_belief_report_num", covars_num_no2)
@@ -840,8 +926,17 @@ for age, we notice that with the smooth red line, the oldest people have lowest 
 
 #### Double Machine Learning method
 
+Finally, we apply *Double Machine Learning* as an additional approach to estimate treatment effects. This method flexibly estimate nuisance components while preserving valid treatment-effect estimation through orthogonalization. In a partially linear form, the model can be written as
 
-Finally, we apply *Double Machine Learning* as an additional approach to estimate treatment effects. This method allows us to control flexibly for the relationship between covariates, treatment assignment, and outcomes. We use gradient boosting to estimate the nuisance functions `g` and `m` under the default configuration. The results are used mainly as a robustness check and as an exploratory tool for treatment heterogeneity.
+\[
+Y_i = \theta D_i + g(X_i) + U_i,
+\]
+
+\[
+D_i = m(X_i) + V_i.
+\]
+
+Here, \(g(X_i)\) captures the relationship between controls and the outcome, while \(m(X_i)\) captures the relationship between controls and treatment assignment. By residualizing both \(Y_i\) and \(D_i\), Double ML reduces sensitivity to first-stage prediction errors. In this project, we use gradient boosting to estimate the nuisance functions. The results are used mainly as a robustness check and as an exploratory tool for treatment heterogeneity.
 
 ```{r double-ml, include=FALSE, results='hide'}
 run_double_ml <- function(outcome_var) {
